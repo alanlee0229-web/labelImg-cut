@@ -302,21 +302,21 @@ class MainWindow(QMainWindow, WindowMixin):
         self.add_block_button = QPushButton('固定区块模式Q')
         self.add_block_button.setStyleSheet(
             "QPushButton{background-color:lightgreen;color:black;font-size:12px;font-weight:bold;border-radius:4px;padding:4px;}")
-        self.add_block_button.setFixedHeight(25)
+        self.add_block_button.setFixedHeight(30)
         self.add_block_button.clicked.connect(self.add_fixed_size_block)
         
         # 添加创建不规则选区按钮
         self.add_freehand_block_button = QPushButton('自定义选区模式E')
         self.add_freehand_block_button.setStyleSheet(
             "QPushButton{background-color:lightyellow;color:black;font-size:12px;font-weight:bold;border-radius:4px;padding:4px;}")
-        self.add_freehand_block_button.setFixedHeight(25)
+        self.add_freehand_block_button.setFixedHeight(30)
         self.add_freehand_block_button.clicked.connect(self.add_freehand_block)
         
         # 添加切割按钮
         self.cut_bbox_button = QPushButton('切割检测框C')
         self.cut_bbox_button.setStyleSheet(
             "QPushButton{background-color:orange;color:black;font-size:12px;font-weight:bold;border-radius:4px;padding:4px;}")
-        self.cut_bbox_button.setFixedHeight(25)
+        self.cut_bbox_button.setFixedHeight(30)
         self.cut_bbox_button.clicked.connect(self.cut_selected_bbox)
         
         # 添加控件到布局
@@ -2042,6 +2042,10 @@ class MainWindow(QMainWindow, WindowMixin):
         return '[{} / {}]'.format(self.cur_img_idx + 1, self.img_count)
 
     def show_bounding_box_from_annotation_file(self, file_path):
+        # 添加file_path为None的检查
+        if file_path is None:
+            return
+            
         if self.default_save_dir is not None:
             basename = os.path.basename(os.path.splitext(file_path)[0])
             xml_path = os.path.join(self.default_save_dir, basename + XML_EXT)
@@ -3862,7 +3866,7 @@ class MainWindow(QMainWindow, WindowMixin):
                             cut_width, cut_height, 
                             max_cuts_x, max_cuts_y,
                             gap_x, gap_y):
-        """执行行错位分割操作，只实现行的错位排列，确保区块之间有间隙"""
+        """执行矩形切割操作，实现更灵活的边界分割策略，优化所有角落的分割效果"""
         # 保存原始形状的标签和复制原始形状
         original_shape = self.canvas.selected_shape
         original_label = original_shape.label if original_shape else ""
@@ -3880,71 +3884,138 @@ class MainWindow(QMainWindow, WindowMixin):
         # 导入Shape类
         from libs.shape import Shape
         
-        # 使用固定的间隙大小，而不是自适应
-        # 确保区块之间有间隙，但在选区内没有重叠
-        actual_gap_x = max(gap_x, 2)  # 至少2像素的间隙
-        actual_gap_y = max(gap_y, 2)
+        # 使用固定的间隙大小
+        actual_gap_x = max(gap_x, 2)  # 至少2像素的水平间隙
+        actual_gap_y = max(gap_y, 2)  # 至少2像素的垂直间隙
         
-        # 设置行偏移比例（可以根据需要调整）
-        row_offset_ratio = 0.5  # 奇数行向右偏移区块宽度的50%
-        
-        # 计算实际的网格布局参数
-        # 计算网格的起始位置（考虑间隙）
-        grid_start_x = min_x + actual_gap_x
-        grid_start_y = min_y + actual_gap_y
+        # 定义重叠度阈值
+        OVERLAP_THRESHOLD = 0.50  # 与原始形状的最小重叠度
+        CORNER_OVERLAP_THRESHOLD = 0.30  # 角落区域的重叠度阈值，进一步降低以更好地覆盖角落
+        MAX_ADJACENT_OVERLAP = 0.35  # 与相邻区块的最大重叠度
         
         # 计算网格的实际步长（包含间隙）
         grid_step_x = cut_width + actual_gap_x
         grid_step_y = cut_height + actual_gap_y
         
-        # 计算网格的实际大小（确保不超出最大边界）
-        # 考虑行错位布局可能需要的额外空间
-        available_width = max_x - grid_start_x
-        available_height = max_y - grid_start_y
+        # 大幅扩展网格起始位置，确保所有角落区域都能被充分覆盖
+        grid_start_x = min_x - grid_step_x * 2  # 向左扩展两个步长
+        grid_start_y = min_y - grid_step_y * 2  # 向上扩展两个步长
         
-        # 计算网格的实际列数和行数
-        actual_cols = int(available_width / grid_step_x) + 1
-        actual_rows = int(available_height / grid_step_y) + 1
+        # 计算完整扩展区域的宽度和高度
+        expanded_width = (max_x - grid_start_x) + grid_step_x * 3  # 向右额外扩展一个步长
+        expanded_height = (max_y - grid_start_y) + grid_step_y * 3  # 向下额外扩展一个步长
         
-        # 遍历网格布局，创建行错位的无重叠区块
-        for row in range(actual_rows):
-            # 计算行偏移（奇数行向右偏移）
-            row_offset = cut_width * row_offset_ratio if row % 2 == 1 else 0
+        # 计算可以放置的行数和列数，确保完全覆盖所有角落
+        cols = int(expanded_width / grid_step_x) + 3  # 更多列数以确保覆盖
+        rows = int(expanded_height / grid_step_y) + 3  # 更多行数以确保覆盖
+        
+        # 用于检查与相邻区块重叠度的函数
+        def calculate_rect_overlap(rect1, rect2):
+            """计算两个矩形的重叠比例"""
+            x1 = max(rect1[0], rect2[0])
+            y1 = max(rect1[1], rect2[1])
+            x2 = min(rect1[2], rect2[2])
+            y2 = min(rect1[3], rect2[3])
             
-            for col in range(actual_cols):
-                # 计算当前区块的坐标（考虑行偏移）
-                x1 = grid_start_x + col * grid_step_x + row_offset
+            # 如果没有重叠
+            if x1 >= x2 or y1 >= y2:
+                return 0
+            
+            # 计算重叠面积
+            overlap_area = (x2 - x1) * (y2 - y1)
+            
+            # 计算较小矩形的面积作为分母
+            rect1_area = (rect1[2] - rect1[0]) * (rect1[3] - rect1[1])
+            rect2_area = (rect2[2] - rect2[0]) * (rect2[3] - rect2[1])
+            smaller_area = min(rect1_area, rect2_area)
+            
+            return overlap_area / smaller_area if smaller_area > 0 else 0
+        
+        # 判断一个区域是否为角落区域或边界区域
+        def is_corner_or_edge_region(x1, y1, x2, y2):
+            """判断当前方块是否靠近原始边界的角落或边缘区域"""
+            # 计算方块中心点
+            center_x = (x1 + x2) / 2
+            center_y = (y1 + y2) / 2
+            
+            # 判断是否靠近角落（距离任一角落小于步长的2倍）
+            dist_to_tl = ((center_x - min_x) ** 2 + (center_y - min_y) ** 2) ** 0.5
+            dist_to_tr = ((center_x - max_x) ** 2 + (center_y - min_y) ** 2) ** 0.5
+            dist_to_bl = ((center_x - min_x) ** 2 + (center_y - max_y) ** 2) ** 0.5
+            dist_to_br = ((center_x - max_x) ** 2 + (center_y - max_y) ** 2) ** 0.5
+            
+            # 判断是否靠近边缘
+            dist_to_left = abs(center_x - min_x)
+            dist_to_right = abs(center_x - max_x)
+            dist_to_top = abs(center_y - min_y)
+            dist_to_bottom = abs(center_y - max_y)
+            
+            # 设置阈值
+            corner_threshold = max(grid_step_x, grid_step_y) * 2.0
+            edge_threshold = max(grid_step_x, grid_step_y) * 1.5
+            
+            # 如果靠近任何角落或边缘，都视为特殊区域
+            return (dist_to_tl < corner_threshold or 
+                    dist_to_tr < corner_threshold or 
+                    dist_to_bl < corner_threshold or 
+                    dist_to_br < corner_threshold or
+                    dist_to_left < edge_threshold or
+                    dist_to_right < edge_threshold or
+                    dist_to_top < edge_threshold or
+                    dist_to_bottom < edge_threshold)
+        
+        # 按照网格布局创建方块，实现更灵活的边界处理
+        for row in range(rows):
+            for col in range(cols):
+                # 计算当前方块的坐标
+                x1 = grid_start_x + col * grid_step_x
                 y1 = grid_start_y + row * grid_step_y
                 x2 = x1 + cut_width
                 y2 = y1 + cut_height
                 
-                # 确保区块不超出最大边界
-                if x2 > max_x or y2 > max_y:
-                    continue
-                
-                # 计算这个区块与原始选区的重叠度
+                # 计算这个方块与原始选区的重叠度
                 overlap_ratio = self._calculate_overlap_ratio(
                     x1, y1, x2, y2, original_shape_copy)
                 
-                # 使用45%/55%的重叠度阈值规则明确处理边界
-                # 1. 重叠超过45%的区块保留
-                # 2. 重叠低于45%的区块不保留
-                # 3. 重叠在45%-55%之间的区块也不保留
-                # 这样可以在边界形成清晰的切割效果
-                if overlap_ratio >= 0.45:  # 只保留重叠度>=45%的区块
-                    # 创建新形状
-                    new_shape = Shape()
-                    new_shape.add_point(QPointF(x1, y1))
-                    new_shape.add_point(QPointF(x2, y1))
-                    new_shape.add_point(QPointF(x2, y2))
-                    new_shape.add_point(QPointF(x1, y2))
-                    new_shape.close()
-                    new_shape.label = original_label
+                # 判断是否为角落或边缘区域，使用不同的重叠度阈值
+                current_threshold = CORNER_OVERLAP_THRESHOLD if is_corner_or_edge_region(x1, y1, x2, y2) else OVERLAP_THRESHOLD
+                
+                # 如果与原始形状的重叠度不足，则跳过
+                if overlap_ratio < current_threshold:
+                    continue
+                
+                # 检查与已添加的相邻区块的重叠度
+                too_much_overlap = False
+                for existing_shape in new_shapes:
+                    # 获取已有形状的边界
+                    existing_points = existing_shape.points
+                    ex1, ey1 = existing_points[0].x(), existing_points[0].y()
+                    ex2, ey2 = existing_points[2].x(), existing_points[2].y()
                     
-                    # 添加到新形状列表
-                    new_shapes.append(new_shape)
+                    # 计算与当前方块的重叠比例
+                    adj_overlap = calculate_rect_overlap((x1, y1, x2, y2), (ex1, ey1, ex2, ey2))
+                    
+                    # 如果重叠度超过最大允许值，则跳过这个方块
+                    if adj_overlap > MAX_ADJACENT_OVERLAP:
+                        too_much_overlap = True
+                        break
+                
+                if too_much_overlap:
+                    continue
+                
+                # 创建新形状
+                new_shape = Shape()
+                new_shape.add_point(QPointF(x1, y1))
+                new_shape.add_point(QPointF(x2, y1))
+                new_shape.add_point(QPointF(x2, y2))
+                new_shape.add_point(QPointF(x1, y2))
+                new_shape.close()
+                new_shape.label = original_label
+                
+                # 添加到新形状列表
+                new_shapes.append(new_shape)
         
-        # 关键修复：确保新创建的形状被正确添加到画布
+        # 确保新创建的形状被正确添加到画布
         if new_shapes:  # 只有当有新形状创建时才执行添加操作
             for shape in new_shapes:
                 self.canvas.shapes.append(shape)
@@ -3973,17 +4044,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # 返回重叠比例
         return overlap_pixels / total_pixels if total_pixels > 0 else 0
         
-        # 添加所有新形状到画布并更新标签列表
-        for shape in new_shapes:
-            self.canvas.shapes.append(shape)
-            self.add_label(shape)
-        
-        # 更新画布显示
-        self.canvas.repaint()
-        self.set_dirty()
-        
-        # 显示切割完成的提示信息
-        QMessageBox.information(self, "切割完成", f"已将检测框切割为 {len(new_shapes)} 个小检测框")
+        # 该部分代码已移除，避免重复执行
     
     def _calculate_coverage_score(self, x1, y1, x2, y2, original_shape, sample_step=5):
         """计算一个矩形块对原始形状的覆盖得分"""
